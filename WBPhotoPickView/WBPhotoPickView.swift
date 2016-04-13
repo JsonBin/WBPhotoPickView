@@ -70,16 +70,25 @@ class WBPhotoPickView: UIViewController, UITableViewDelegate, UITableViewDataSou
                     let im_array=NSMutableArray()
                     let options=PHImageRequestOptions()
                     options.synchronous=true  // 设置为同步方式
-                    for index in 0..<asarray.count {
-                        manage.requestImageForAsset((asarray[index] as! PHAsset), targetSize: PHImageManagerMaximumSize, contentMode: PHImageContentMode.Default, options: options, resultHandler: { (image, dic) in
+                    // 采用子线程获取图片，加快读取速度
+                    let group=dispatch_group_create()
+                    let queue=dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0)
+                    dispatch_group_async(group, queue, { 
+                        for index in 0..<asarray.count {
+                            manage.requestImageForAsset((asarray[index] as! PHAsset), targetSize: PHImageManagerMaximumSize, contentMode: PHImageContentMode.Default, options: options, resultHandler: { (image, dic) in
                                 im_array.addObject(image!)
-                        })
-                    }
-                    if im_array.count>0 {
-                        nameArray.addObject(collect.localizedTitle!)
-                        imageArray.addObject(im_array)
-                        tableView.reloadData()
-                    }
+                            })
+                        }
+                    })
+                    dispatch_group_notify(group, queue, {
+                        if im_array.count>0 {
+                            weakSelf?.nameArray.addObject(collect.localizedTitle!)
+                            weakSelf?.imageArray.addObject(im_array)
+                            dispatch_async(dispatch_get_main_queue(), {
+                                weakSelf?.tableView.reloadData()
+                            })
+                        }
+                    })
                 }
             }
         }else{
@@ -169,6 +178,7 @@ class WBPhotoSelectView: UIViewController, UICollectionViewDelegate, UICollectio
     
     private var colloection:UICollectionView?
     private let selectArray=NSMutableArray()
+    private var indexPathArray=NSMutableArray()
     
     internal func photo(image:(imagearray:NSArray)->Void) -> Void{
         photoArray=image
@@ -222,6 +232,16 @@ class WBPhotoSelectView: UIViewController, UICollectionViewDelegate, UICollectio
         }else{
             cell.imageView.image=UIImage.init(CGImage: array[indexPath.row] as! CGImage)
         }
+        // 强制取消刷新时重用机制出错的问题
+        if !indexPathArray.containsObject(indexPath) {
+            cell.button.selected=false
+            cell.selectShaplayer.fillColor=UIColor.whiteColor().CGColor
+            cell.mask.removeFromSuperview()
+        }else{
+            cell.button.selected=true
+            cell.selectShaplayer.fillColor=UIColor.greenColor().CGColor
+            cell.contentView.insertSubview(cell.mask, aboveSubview: cell.imageView)
+        }
         // 选择回调
         weak var weakSelf=self
         cell.initIndex { (flag) in
@@ -232,33 +252,39 @@ class WBPhotoSelectView: UIViewController, UICollectionViewDelegate, UICollectio
                     cell.selectShaplayer.fillColor=UIColor.whiteColor().CGColor
                     cell.mask.removeFromSuperview()
                     // 提示
-                    let label=UILabel()
-                    let win=UIApplication.sharedApplication().keyWindow!
-                    label.bounds=CGRectMake(0, 0, win.bounds.size.width/2+40, 20)
-                    label.center=win.center
-                    label.textAlignment = .Center
-                    label.layer.cornerRadius=2
-                    label.text="最多能选择 \(NSString.init(format: "%ld", (weakSelf?.photoCount)!) as String) 张照片!"
-                    label.font=UIFont.systemFontOfSize(15)
-                    label.textColor=UIColor.whiteColor()
-                    label.backgroundColor=UIColor ( red: 0.0, green: 0.0, blue: 0.0, alpha: 0.5 )
-                    win.addSubview(label)
-                    let time = dispatch_time(DISPATCH_TIME_NOW, Int64(1 * Double(NSEC_PER_SEC)))
-                    dispatch_after(time, dispatch_get_main_queue()) {
-                        label.removeFromSuperview()
-                    }
+                    weakSelf?.warnlabel("最多能选择 \(NSString.init(format: "%ld", (weakSelf?.photoCount)!) as String) 张照片!")
                 }else{
                     weakSelf?.selectArray.addObject((weakSelf?.array[indexPath.row])!)
+                    weakSelf?.indexPathArray.addObject(indexPath)
                 }
             }else{
                 if weakSelf?.selectArray.count>0{
                     weakSelf?.selectArray.removeObject((weakSelf?.array[indexPath.row])!)
+                    weakSelf?.indexPathArray.removeObject(indexPath)
                 }
             }
         }
-        
         return cell
     }
+    
+    private func warnlabel(string:NSString)->Void{
+        let label=UILabel()
+        let win=UIApplication.sharedApplication().keyWindow!
+        label.bounds=CGRectMake(0, 0, win.bounds.size.width/2+40, 20)
+        label.center=win.center
+        label.textAlignment = .Center
+        label.layer.cornerRadius=2
+        label.text=string as String
+        label.font=UIFont.systemFontOfSize(15)
+        label.textColor=UIColor.whiteColor()
+        label.backgroundColor=UIColor ( red: 0.0, green: 0.0, blue: 0.0, alpha: 0.8 )
+        win.addSubview(label)
+        let time = dispatch_time(DISPATCH_TIME_NOW, Int64(1 * Double(NSEC_PER_SEC)))
+        dispatch_after(time, dispatch_get_main_queue()) {
+            label.removeFromSuperview()
+        }
+    }
+    
     // 偏移，上 10 左 1 下 0 右 1
     internal func collectionView(collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, insetForSectionAtIndex section: Int) -> UIEdgeInsets {
         return UIEdgeInsetsMake(10, 1, 0, 1)
@@ -266,8 +292,43 @@ class WBPhotoSelectView: UIViewController, UICollectionViewDelegate, UICollectio
     
     //MARK: UICollectionViewDelegate
     func collectionView(collectionView: UICollectionView, didSelectItemAtIndexPath indexPath: NSIndexPath) {
-        if allowEditing {       // 查看照片 (还未开发)
-            
+        weak var weakself=self
+        if allowEditing {       // 查看照片
+            let scanView=scanPhoto()
+            scanView.array=array
+            scanView.indexArray=indexPathArray
+            scanView.count=photoCount
+            let oldArray:NSArray=indexPathArray.mutableCopy() as! NSArray
+            // 查看照片选择回调
+            scanView.selectIndexPathArray({ (poarray) in
+                // 如果选择的照片还未选过，则添加，否则不添加,若没有，则删除
+                // 删除原始数据
+                weakself?.selectArray.removeAllObjects()
+                for i in 0..<oldArray.count {
+                    // 删除所有数据
+                    let cell:WBPhotoSelectViewCell=collectionView.cellForItemAtIndexPath(oldArray[i]  as! NSIndexPath) as! WBPhotoSelectViewCell
+                    cell.button.selected=false
+                    cell.selectShaplayer.fillColor=UIColor.whiteColor().CGColor
+                    cell.mask.removeFromSuperview()
+                }
+                // 添加新数据
+                for index in 0..<poarray.count{
+                    // 添加新数据
+                    let row=(poarray[index] as! NSIndexPath).row
+                    weakself?.selectArray.addObject((weakself?.array[row])!)  // 添加新数据
+                    let cell:WBPhotoSelectViewCell=collectionView.cellForItemAtIndexPath(poarray[index]  as! NSIndexPath) as! WBPhotoSelectViewCell
+                    cell.button.selected=true
+                    cell.selectShaplayer.fillColor=UIColor.greenColor().CGColor
+                    cell.contentView.insertSubview(cell.mask, aboveSubview: cell.imageView)
+                }
+               self.indexPathArray=poarray  // 重新赋值数组
+            })
+            scanView.showPhoto()
+            scanView.transform=CGAffineTransformMakeScale(0.001, 0.001)
+            scanView.scollec!.scrollToItemAtIndexPath(NSIndexPath.init(forRow: indexPath.row, inSection: 0), atScrollPosition: .None, animated: false)
+            UIView.animateWithDuration(0.2, animations: { 
+                scanView.transform=CGAffineTransformIdentity
+            })
         }
     }
 }
@@ -276,13 +337,13 @@ class WBPhotoSelectView: UIViewController, UICollectionViewDelegate, UICollectio
 class WBPhotoSelectViewCell: UICollectionViewCell {
     
     internal var imageView=UIImageView()
-    // 回调index
+    // 回调indexPath，照片加入数组
     internal var index:((flag:Bool)->Void)?
     internal let button=UIButton()
+    internal let mask=UIView()
+    internal let selectShaplayer=CAShapeLayer()
     
-    private let mask=UIView()
     private let selectLayer=CALayer()
-    private let selectShaplayer=CAShapeLayer()
     
     internal func initIndex(count:(flag:Bool)->Void) -> Void{
         index=count
@@ -297,7 +358,7 @@ class WBPhotoSelectViewCell: UICollectionViewCell {
         selectLayer.position = CGPointMake(self.bounds.width-15, 15)
         selectLayer.cornerRadius=15
         selectLayer.bounds = CGRectMake(0, 0, 30, 30)
-        selectLayer.backgroundColor = UIColor ( red: 0.4, green: 0.4, blue: 0.4, alpha: 1.0 ).CGColor
+        selectLayer.backgroundColor = UIColor ( red: 0.4, green: 0.4, blue: 0.4, alpha: 0.5 ).CGColor
         imageView.layer.addSublayer(selectLayer)
         
         let path  = UIBezierPath()
@@ -318,6 +379,7 @@ class WBPhotoSelectViewCell: UICollectionViewCell {
         
         button.frame=CGRectMake(self.bounds.width-30, 0, 30, 30)
         button.backgroundColor=UIColor.clearColor()
+        button.selected=false
         button.addTarget(self, action: #selector(self.selectImage(_:)), forControlEvents: .TouchUpInside)
         self.contentView.addSubview(button)
         
@@ -378,6 +440,206 @@ class WBPhotoSelectViewCell: UICollectionViewCell {
         return layer
     }
     */
+}
+
+// 查看照片
+class scanPhoto: UIView , UICollectionViewDelegate, UICollectionViewDataSource{
+    
+    internal var array:NSArray?
+    internal var count:NSInteger?
+    internal var photoIndexArray:((poarray:NSMutableArray)->Void)?
+    
+    private var win:UIWindow?
+    private var scollec:UICollectionView?
+    private var indexArray=NSMutableArray() // 记录选取照片的indexPath
+    
+    internal func showPhoto()->Void{
+        win=UIApplication.sharedApplication().keyWindow
+        self.backgroundColor=UIColor ( red: 0.0, green: 0.0, blue: 0.0, alpha: 0.7 )
+        self.frame=win!.bounds
+        createCollection()
+        self.center=win!.center
+        win!.addSubview(self)
+    }
+    
+    internal func selectIndexPathArray(photoarray:(poarray:NSMutableArray)->Void)->Void{
+        photoIndexArray=photoarray
+    }
+    
+    private func createCollection() -> Void {
+        let flow=UICollectionViewFlowLayout()
+        flow.minimumLineSpacing=0
+        flow.minimumInteritemSpacing=0
+        flow.itemSize=CGSizeMake(self.bounds.width, self.bounds.height)
+        flow.scrollDirection = .Horizontal
+        scollec=UICollectionView.init(frame: self.bounds, collectionViewLayout: flow)
+        scollec!.backgroundColor=UIColor.clearColor()
+        scollec!.pagingEnabled=true
+        scollec!.bounces=true
+        scollec!.showsVerticalScrollIndicator=false
+        scollec!.delegate=self
+        scollec!.dataSource=self
+        scollec!.registerClass(scanPhotoCell.classForKeyedArchiver(), forCellWithReuseIdentifier: "scanCell")
+        self.addSubview(scollec!)
+        
+        let bgView=UIView()
+        bgView.frame=CGRectMake(0, self.bounds.height-40, self.bounds.width, 40)
+        bgView.backgroundColor=UIColor ( red: 0.0, green: 0.0, blue: 0.0, alpha: 0.5 )
+        self.addSubview(bgView)
+        
+        let cancle=UIButton.init(type: .System)
+        cancle.frame=CGRectMake(0, 0, 60, 40)
+        cancle.setTitle("取消", forState: .Normal)
+        cancle.backgroundColor=UIColor.clearColor()
+        cancle.setTitleColor(UIColor.whiteColor(), forState: .Normal)
+        cancle.addTarget(self, action: #selector(scanPhoto.cancle), forControlEvents: .TouchUpInside)
+        bgView.addSubview(cancle)
+        
+        let done=UIButton.init(type: .System)
+        done.frame=CGRectMake(self.frame.size.width-60, 0, 60, 40)
+        done.setTitle("完成", forState: .Normal)
+        done.backgroundColor=UIColor.clearColor()
+        done.setTitleColor(UIColor.whiteColor(), forState: .Normal)
+        done.addTarget(self, action: #selector(scanPhoto.done), forControlEvents: .TouchUpInside)
+        bgView.addSubview(done)
+    }
+    
+    internal func cancle()->Void{
+        UIView.animateWithDuration(0.2, animations: {
+            self.transform=CGAffineTransformMakeScale(0.0001, 0.0001)
+        }) { (flag) in
+            self.removeFromSuperview()
+        }
+        self.removeFromSuperview()
+    }
+    
+    internal func done()->Void{
+        // 回调选择好的照片
+        if (photoIndexArray != nil) {
+            photoIndexArray!(poarray: indexArray)
+        }
+        cancle()
+    }
+    
+    //MARK: UICollectionViewDelegate, UICollectionViewDataSource
+    internal func collectionView(collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        return array!.count
+    }
+    
+    internal func collectionView(collectionView: UICollectionView, cellForItemAtIndexPath indexPath: NSIndexPath) -> UICollectionViewCell {
+        let cell:scanPhotoCell=collectionView.dequeueReusableCellWithReuseIdentifier("scanCell", forIndexPath: indexPath) as! scanPhotoCell
+        var image:UIImage?
+        if #available(iOS 8.0, *) {
+            image=array![indexPath.row] as? UIImage
+        }else{
+            image=UIImage.init(CGImage: array![indexPath.row] as! CGImage)
+        }
+        let height=image!.size.height*self.bounds.width/image!.size.width
+        if height<self.bounds.height {
+            cell.imageView.bounds=CGRectMake(0, 0, self.bounds.width, height)
+        }else{
+            cell.imageView.bounds=CGRectMake(0, 0, image!.size.width/image!.size.height*self.bounds.height, self.bounds.height)
+        }
+        cell.imageView.image=image
+        // 选择了照片再查看,取消出现混乱选择的情况
+        if indexArray.containsObject(indexPath){
+            cell.selectImage(true)
+        }else{
+            cell.selectImage(false)
+        }
+        return cell
+    }
+    
+    internal func collectionView(collectionView: UICollectionView, didSelectItemAtIndexPath indexPath: NSIndexPath) {
+        let cell:scanPhotoCell=collectionView.cellForItemAtIndexPath(indexPath) as! scanPhotoCell
+        if indexArray.containsObject(indexPath) {
+            indexArray.removeObject(indexPath)
+            cell.selectImage(false)
+        }else{
+            if indexArray.count>count!-1 {
+                warnlabel("最多能选择 \(NSString.init(format: "%ld", count!) as String) 张照片!")
+            }else{
+                indexArray.addObject(indexPath)
+                cell.selectImage(true)
+            }
+        }
+    }
+    
+    private func warnlabel(string:NSString)->Void{
+        let label=UILabel()
+        let win=UIApplication.sharedApplication().keyWindow!
+        label.bounds=CGRectMake(0, 0, win.bounds.size.width/2+40, 20)
+        label.center=win.center
+        label.textAlignment = .Center
+        label.layer.cornerRadius=2
+        label.text=string as String
+        label.font=UIFont.systemFontOfSize(15)
+        label.textColor=UIColor.whiteColor()
+        label.backgroundColor=UIColor ( red: 0.0, green: 0.0, blue: 0.0, alpha: 0.8 )
+        win.addSubview(label)
+        let time = dispatch_time(DISPATCH_TIME_NOW, Int64(1 * Double(NSEC_PER_SEC)))
+        dispatch_after(time, dispatch_get_main_queue()) {
+            label.removeFromSuperview()
+        }
+    }
+}
+
+class  scanPhotoCell: UICollectionViewCell {
+    internal var imageView=UIImageView()
+    
+    private let mask=UIView()
+    private let selectLayer=CALayer()
+    private let selectShaplayer=CAShapeLayer()
+    
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        
+        imageView.frame=self.bounds
+        self.contentView.addSubview(imageView)
+        
+        selectLayer.position = self.contentView.center
+        selectLayer.cornerRadius=25
+        selectLayer.bounds = CGRectMake(0, 0, 50, 50)
+        selectLayer.backgroundColor = UIColor ( red: 0.4, green: 0.4, blue: 0.4, alpha: 0.5 ).CGColor
+        
+        let path  = UIBezierPath()
+        path.moveToPoint(CGPointMake(20, 22))
+        path.addLineToPoint(CGPointMake(25, 26))
+        path.addLineToPoint(CGPointMake(32, 18))
+        path.addLineToPoint(CGPointMake(34, 20))
+        path.addLineToPoint(CGPointMake(25, 30))
+        path.addLineToPoint(CGPointMake(18, 24))
+        path.closePath()
+        
+        selectShaplayer.path = path.CGPath
+        selectShaplayer.lineWidth = 0.8
+        selectShaplayer.strokeColor=UIColor.clearColor().CGColor
+        selectShaplayer.fillColor = UIColor.whiteColor().CGColor
+        layer.position = self.center
+        selectLayer.addSublayer(selectShaplayer)
+        
+        mask.frame=self.bounds
+        mask.backgroundColor=UIColor ( red: 0.0, green: 0.0, blue: 0.0, alpha: 0.4 )
+        
+    }
+    
+    internal func selectImage(falg:Bool)->Void{
+        
+        if falg {
+            selectShaplayer.fillColor=UIColor.greenColor().CGColor
+            self.contentView.layer.addSublayer(selectLayer)
+            self.contentView.insertSubview(mask, aboveSubview: imageView)
+        }else{
+            selectShaplayer.fillColor = UIColor.whiteColor().CGColor
+            mask.removeFromSuperview()
+            selectLayer.removeFromSuperlayer()
+        }
+    }
+    
+    required init?(coder aDecoder: NSCoder) {
+        super.init(coder: aDecoder)
+    }
+
 }
 
 

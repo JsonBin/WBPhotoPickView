@@ -29,7 +29,7 @@ class ViewController: UIViewController {
         
         let  v = WBPhotoPickView()
         // 设置属性(可设置，可不设置)
-        v.allowEditing = false  // 设置照片是否可查看编辑(默认false)
+        v.allowEditing = true  // 设置照片是否可查看编辑(默认false)
         v.photoCount=4 // 设置需要选取的照片数量（默认最多能选取 5 张）
         
         v.selectPhoto { (photo) in
